@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings, resolve_llama_api_key, resolve_whisper_api_key
 from routers.classify import router as classify_router
+from routers.follow_up import router as follow_up_router
 from routers.sessions import router as sessions_router
 from routers.upload import router as upload_router
 
@@ -40,6 +41,7 @@ app.add_middleware(
 # Mounted at root so Next.js dev rewrite `/api/:path*` → `http://127.0.0.1:8000/:path*` lines up.
 app.include_router(classify_router)
 app.include_router(upload_router)
+app.include_router(follow_up_router)
 app.include_router(sessions_router)
 
 

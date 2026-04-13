@@ -20,20 +20,33 @@ from groq import Groq
 from config import get_settings, resolve_llama_api_key
 from models.schemas import QuestionObject
 from services.persona_mapping_fallback import get_persona
+from services.text_snippet import snippet_from_line_range
 
 MAX_TOTAL_CONTEXT_CHARS = 120_000
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+_SOURCE_SNIPPET_MAX_WORDS = 20
+
+
+def _truncate_to_words(text: str, max_words: int = _SOURCE_SNIPPET_MAX_WORDS) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text.strip()
+    return " ".join(words[:max_words]).strip()
+
 
 EXAMINER_INSTRUCTION = """Review the following student submission. Identify three specific logic 'hotspots'—areas where the author had to make a conscious design or argumentative choice. Generate one question for each hotspot that requires the student to explain the 'why' behind their choices, not just the 'what'.
 
 Rules:
 - Questions must reference concrete details from the materials (names, structures, theorems, passages, metrics)—never generic textbook prompts.
+- Each question's line_range must tightly bound the smallest passage you are probing—copy those line numbers from the 4-digit prefixes in that SOURCE block.
+- source_snippet: You MUST copy a direct quote from the SOURCE lines (same file as line_range) that justifies this question — at most 20 words, contiguous words as they appear in the text (no paraphrase, no summary of the whole document). If you cannot find a tight quote, use the first 20 words of context_reference.
 - Output ONLY valid JSON with this exact shape (no markdown fences):
-{"questions":[{"text":"string","file_name":"string","line_range":[start_line,end_line]}, ...]}
+{"questions":[{"text":"string","file_name":"string","line_range":[start_line,end_line],"context_reference":"string","source_snippet":"string"}, ...]}
 - Exactly 3 objects in "questions".
 - file_name MUST exactly match one of the SOURCE_LABEL values given below.
 - line_range must be inclusive 1-based line numbers referring to the 4-digit line prefixes in that SOURCE block only.
-- start_line <= end_line."""
+- start_line <= end_line.
+- context_reference MUST be the verbatim excerpt from the submission for that line_range: copy the exact lines of text as they appear (join with newlines). Do not use vague phrases like "from bullet points" or "the introduction"—paste the actual words from those numbered lines."""
 
 LATEX_FOCUS_ADDENDUM = """
 LaTeX and formal notation: The submission may contain raw LaTeX (e.g. \\frac, \\sum, \\int, \\mathbb, \\begin{equation}). Where such patterns appear in the SOURCE blocks, at least one of your three questions MUST probe the underlying mathematical logic—definitions, quantifiers, why that formalism was chosen, or correctness of the argument—not merely how to read the symbols."""
@@ -179,6 +192,7 @@ def generate_three_questions(
         raise RuntimeError("Model did not return exactly 3 questions")
 
     labels = list(line_counts.keys())
+    blocks_map: dict[str, str] = dict(blocks)
     out: list[QuestionObject] = []
 
     for item in items:
@@ -201,11 +215,24 @@ def generate_three_questions(
         nlines = line_counts.get(resolved, 1)
         start, end = _clamp_range(start, end, max(1, nlines))
 
+        raw_content = blocks_map.get(resolved, "")
+        verbatim = snippet_from_line_range(raw_content, start, end)
+        if not verbatim.strip():
+            verbatim = (item.get("context_reference") or "").strip() if isinstance(item, dict) else ""
+
+        raw_snip = str(item.get("source_snippet", "") or "").strip()
+        if raw_snip:
+            snippet = _truncate_to_words(raw_snip)
+        else:
+            snippet = _truncate_to_words(verbatim) if verbatim.strip() else ""
+
         out.append(
             QuestionObject(
                 text=text,
                 file_name=resolved,
                 line_range=[start, end],
+                context_reference=verbatim,
+                source_snippet=snippet,
             )
         )
 

@@ -2,7 +2,7 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Viva backend (FastAPI)
 
-Python ingestion uses **Crawl4AI** (Playwright) for JS-heavy sites when `FIRECRAWL_API_KEY` is not set, and **Docling** for PDFs with formula → LaTeX enrichment. After installing dependencies, run this **once** per machine:
+Python ingestion uses **Crawl4AI** (Playwright) for JS-heavy sites when `FIRECRAWL_API_KEY` is not set, and **Docling** for PDFs (lightweight by default: text-only pipeline without OCR/table/formula models; set `VIVA_DOC_FULL_PIPELINE=true` for richer PDFs). After installing dependencies, run this **once** per machine:
 
 ```bash
 cd backend
@@ -10,7 +10,7 @@ python -m venv .venv && source .venv/bin/activate  # Windows: .venv\Scripts\acti
 pip install -r requirements.txt
 python -m crawl4ai.install
 playwright install chromium
-uvicorn main:app --reload --host 127.0.0.1 --port 8000
+uvicorn main:app --reload --host 127.0.0.1 --port 8000 --timeout-keep-alive 120
 ```
 
 On startup, the API logs a reminder if you skip the Playwright step.

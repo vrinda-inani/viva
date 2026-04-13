@@ -5,9 +5,11 @@ deep path (Docling PDF + Crawl4AI / Firecrawl / GitHub) for full viva question c
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
+import random
 import tempfile
 from pathlib import PurePath
 from urllib.parse import urlparse
@@ -20,6 +22,12 @@ from services.content_extract import extract_text_from_file
 from services.url_scraper import scrape_url_to_text
 
 logger = logging.getLogger(__name__)
+
+# Crawl4AI / Playwright: realistic desktop Chrome UA + stealth (see _crawl4ai_markdown).
+_C4AI_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
 
 MAX_URLS = 12
 MAX_FILES = 20
@@ -273,6 +281,14 @@ def _firecrawl_markdown(url: str) -> str | None:
     return None
 
 
+def _host_is_linkedin(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
 def _prefer_firecrawl(url: str) -> bool:
     if not os.getenv("FIRECRAWL_API_KEY", "").strip():
         return False
@@ -294,13 +310,43 @@ def _markdown_from_crawl4ai_result(result: object) -> str | None:
     return None
 
 
+def _build_crawl4ai_browser_config(*, linkedin: bool) -> object | None:
+    """Stealth + realistic UA; visible window on LinkedIn (headless=False) to reduce 999 blocks."""
+    from crawl4ai import BrowserConfig
+
+    headless = not linkedin
+    attempts: tuple[dict, ...] = (
+        {
+            "headless": headless,
+            "verbose": False,
+            "user_agent": _C4AI_USER_AGENT,
+            "enable_stealth": True,
+        },
+        {
+            "headless": headless,
+            "verbose": False,
+            "user_agent": _C4AI_USER_AGENT,
+        },
+        {"headless": True, "verbose": False},
+    )
+    for kw in attempts:
+        try:
+            return BrowserConfig(**kw)
+        except TypeError:
+            continue
+        except Exception:
+            continue
+    return None
+
+
 async def _crawl4ai_markdown(url: str) -> str | None:
     """
     Playwright-backed crawl when Firecrawl is not configured.
     DefaultMarkdownGenerator + PruningContentFilter strips nav/footers for clean markdown.
+    Uses stealth + realistic UA; LinkedIn uses a headed browser, networkidle, and a random pre-crawl delay.
     """
     try:
-        from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
         from crawl4ai.content_filter_strategy import PruningContentFilter
         from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
     except ImportError:
@@ -312,6 +358,8 @@ async def _crawl4ai_markdown(url: str) -> str | None:
     except ImportError:
         CacheMode = None  # type: ignore[misc, assignment]
 
+    linkedin = _host_is_linkedin(url)
+
     md_gen = DefaultMarkdownGenerator(
         content_filter=PruningContentFilter(threshold=0.45, threshold_type="fixed"),
         options={
@@ -319,35 +367,45 @@ async def _crawl4ai_markdown(url: str) -> str | None:
             "escape_html": True,
         },
     )
+    page_timeout = 120_000 if linkedin else 90_000
     run_kwargs: dict = {
         "markdown_generator": md_gen,
-        "wait_until": "domcontentloaded",
-        "page_timeout": 60000,
-        # Wait 2s after load so JS portfolios can render (headless Playwright)
+        "wait_until": "networkidle",
+        "page_timeout": page_timeout,
         "delay_before_return_html": 2.0,
     }
     if CacheMode is not None:
         run_kwargs["cache_mode"] = CacheMode.DISABLED
 
-    browser_cfg: object | None
-    try:
-        browser_cfg = BrowserConfig(headless=True, verbose=False)
-    except Exception:
-        browser_cfg = None
+    browser_cfg = _build_crawl4ai_browser_config(linkedin=linkedin)
 
-    try:
-        run_cfg = CrawlerRunConfig(**run_kwargs)
-    except TypeError:
-        run_kwargs.pop("delay_before_return_html", None)
-        run_cfg = CrawlerRunConfig(**run_kwargs)
+    run_cfg: CrawlerRunConfig | None = None
+    for wait_until in ("networkidle", "domcontentloaded"):
+        kw = {**run_kwargs, "wait_until": wait_until}
+        try:
+            run_cfg = CrawlerRunConfig(**kw)
+            break
+        except TypeError:
+            kw.pop("delay_before_return_html", None)
+            try:
+                run_cfg = CrawlerRunConfig(**kw)
+                break
+            except TypeError:
+                continue
+    if run_cfg is None:
+        return None
+
+    async def _run_crawler(crawler: object) -> object:
+        await asyncio.sleep(random.uniform(1.0, 3.0))
+        return await crawler.arun(url=url, config=run_cfg)
 
     try:
         if browser_cfg is not None:
             async with AsyncWebCrawler(config=browser_cfg) as crawler:
-                result = await crawler.arun(url=url, config=run_cfg)
+                result = await _run_crawler(crawler)
         else:
             async with AsyncWebCrawler() as crawler:
-                result = await crawler.arun(url=url, config=run_cfg)
+                result = await _run_crawler(crawler)
     except Exception as e:
         logger.warning("Crawl4AI failed for %s: %s", url, e)
         return None
@@ -378,32 +436,91 @@ def extract_pdf_fast_sample(data: bytes, max_chars: int = 1800) -> tuple[str, st
         return "", f"PDF read failed: {e!s}"
 
 
+def _pdf_format_option_for_opts(opts: "PdfPipelineOptions") -> "PdfFormatOption":
+    """Prefer PyPdfium backend + pipeline opts so Docling skips docling-parse / heavy layout weights when possible."""
+    from docling.document_converter import PdfFormatOption
+
+    try:
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+
+        return PdfFormatOption(pipeline_options=opts, backend=PyPdfiumDocumentBackend)
+    except Exception:
+        return PdfFormatOption(pipeline_options=opts)
+
+
 def extract_pdf_docling(data: bytes) -> tuple[str, str | None]:
     """
-    Docling PDF → Markdown with formula enrichment (LaTeX) when available.
-    Falls back to PyMuPDF-style text via pypdf if Docling fails.
+    Docling PDF → Markdown. Default path is lightweight: no OCR/table/formula models,
+    TableFormer **fast** mode, **force_backend_text** (embedded PDF text, no layout NN),
+    and **PyPdfium** backend when available — avoids "loading weights" / 503 on simple PDFs.
+    Set VIVA_DOC_FULL_PIPELINE=true for richer (still TableFormer fast) processing.
+    Falls back to pypdf if Docling fails.
     """
     if len(data) > MAX_FILE_BYTES:
         return "", "File too large"
 
     try:
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
-        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.pipeline_options import (
+            PdfPipelineOptions,
+            TableFormerMode,
+            TableStructureOptions,
+        )
+        from docling.document_converter import DocumentConverter
     except ImportError:
         return extract_pdf_fast_sample(data, max_chars=500_000)
 
-    opts = PdfPipelineOptions()
-    # Deep ingest: prefer LaTeX for formulas (\\sum, \\frac, …); set VIVA_DOC_FORMULAS=false to skip
-    opts.do_formula_enrichment = os.getenv("VIVA_DOC_FORMULAS", "true").lower() not in (
-        "0",
-        "false",
-        "no",
+    full_pipeline = os.getenv("VIVA_DOC_FULL_PIPELINE", "").lower() in (
+        "1",
+        "true",
+        "yes",
     )
+    fast_table_opts = TableStructureOptions(mode=TableFormerMode.FAST)
 
+    if full_pipeline:
+        formula_on = os.getenv("VIVA_DOC_FORMULAS", "true").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        try:
+            opts = PdfPipelineOptions(
+                do_formula_enrichment=formula_on,
+                table_structure_options=fast_table_opts,
+                generate_page_images=False,
+                generate_picture_images=False,
+            )
+        except TypeError:
+            opts = PdfPipelineOptions()
+            opts.do_formula_enrichment = formula_on
+            opts.table_structure_options = fast_table_opts
+    else:
+        light_kw: dict = {
+            "do_ocr": False,
+            "do_table_structure": False,
+            "do_formula_enrichment": False,
+            "table_structure_options": fast_table_opts,
+            "generate_page_images": False,
+            "generate_picture_images": False,
+        }
+        try:
+            opts = PdfPipelineOptions(**light_kw, force_backend_text=True)
+        except TypeError:
+            opts = PdfPipelineOptions(**light_kw)
+            if hasattr(opts, "force_backend_text"):
+                opts.force_backend_text = True
+        for _attr in (
+            "do_code_enrichment",
+            "do_picture_description",
+            "do_picture_classification",
+        ):
+            if hasattr(opts, _attr):
+                setattr(opts, _attr, False)
+
+    pdf_opt = _pdf_format_option_for_opts(opts)
     converter = DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=opts),
+            InputFormat.PDF: pdf_opt,
         }
     )
 

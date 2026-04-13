@@ -8,16 +8,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session
 
 from database import VivaSession, get_db
+from dev_constants import LOCAL_DEV_FALLBACK_SESSION_ID
 
 _log = logging.getLogger(__name__)
 
-LOCAL_DEV_FALLBACK_SESSION_ID = "local-test-session"
 from models.schemas import UploadResponse
 from services.classifier import (
     ClassificationResult,
     classify_submission,
     sample_submission_text,
 )
+from services.extracted_preview import build_extracted_from_blocks
 from services.ingest import ingest_submission_blocks
 from services.persona_mapping import classification_to_api
 from services.question_generator import generate_three_questions
@@ -92,8 +93,12 @@ async def upload_submission(
         print(f"[upload] WARNING: {msg}", flush=True)
         session_id_str = LOCAL_DEV_FALLBACK_SESSION_ID
 
+    extracted_text, extracted_sources = build_extracted_from_blocks(blocks)
+
     return UploadResponse(
         session_id=session_id_str,
         question_objects=questions,
         classification=classification,
+        extracted_text=extracted_text,
+        extracted_sources=extracted_sources,
     )

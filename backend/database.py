@@ -26,6 +26,10 @@ class VivaSession(SQLModel, table=True):
     transcript: Optional[str] = Field(default=None)
     integrity_alerts: Optional[int] = Field(default=None)
     final_score: Optional[float] = Field(default=None)
+    session_metadata: Optional[str] = Field(
+        default=None,
+        description="JSON string: blur segments, fullscreen exits, etc.",
+    )
 
 
 _engine = None

@@ -40,6 +40,8 @@ export function LobbyShell() {
     startSession,
     setSessionId,
     setQuestions,
+    setExtractedText,
+    setExtractedSources,
     setUploads,
     classification,
     setClassification,
@@ -112,7 +114,13 @@ export function LobbyShell() {
       await new Promise((r) => setTimeout(r, 520));
       setProcessingStep("generating");
       const meta = buildUploadItems(files, urls);
-      const { sessionId, questions, classification: clsFinal } = await postUpload({
+      const {
+        sessionId,
+        questions,
+        classification: clsFinal,
+        extractedText,
+        extractedSources,
+      } = await postUpload({
         files,
         urls,
         uploadsMeta: meta,
@@ -120,6 +128,8 @@ export function LobbyShell() {
       });
       setSessionId(sessionId);
       setQuestions(questions);
+      setExtractedText(extractedText);
+      setExtractedSources(extractedSources);
       setClassification(clsFinal);
       setUploads(meta);
       startSession();

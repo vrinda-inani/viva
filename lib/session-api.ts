@@ -4,6 +4,8 @@ export type FinalizeSessionPayload = {
   transcript: string;
   integrityAlertCount: number;
   finalScore?: number | null;
+  /** JSON string of SessionMetadata (blur segments, fullscreen exits). */
+  sessionMetadataJson?: string | null;
 };
 
 export async function postFinalizeSession(
@@ -19,6 +21,7 @@ export async function postFinalizeSession(
         transcript: payload.transcript,
         integrity_alert_count: payload.integrityAlertCount,
         final_score: payload.finalScore ?? null,
+        session_metadata_json: payload.sessionMetadataJson ?? null,
       }),
     },
   );

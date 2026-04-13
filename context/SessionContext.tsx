@@ -7,11 +7,15 @@ import {
   useMemo,
   useRef,
   useState,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import type {
   ClassificationInfo,
+  ExtractedSource,
   QuestionObject,
+  SessionMetadata,
   SessionStatus,
   SubjectCategory,
   UploadItem,
@@ -28,11 +32,15 @@ type SessionContextValue = {
   activeFileId: string | null;
   setActiveFileId: (id: string | null) => void;
   currentQuestionIndex: number;
-  setCurrentQuestionIndex: (n: number) => void;
+  setCurrentQuestionIndex: Dispatch<SetStateAction<number>>;
   uploads: UploadItem[];
   setUploads: (items: UploadItem[]) => void;
   questions: QuestionObject[];
-  setQuestions: (q: QuestionObject[]) => void;
+  setQuestions: Dispatch<SetStateAction<QuestionObject[]>>;
+  extractedText: string;
+  setExtractedText: (t: string) => void;
+  extractedSources: ExtractedSource[];
+  setExtractedSources: Dispatch<SetStateAction<ExtractedSource[]>>;
   sessionId: string | null;
   setSessionId: (id: string | null) => void;
   classification: ClassificationInfo | null;
@@ -45,6 +53,13 @@ type SessionContextValue = {
   appendTranscriptSegment: (text: string) => void;
   integrityAlertCount: number;
   incrementIntegrityAlerts: () => void;
+  tabSwitchCount: number;
+  setTabSwitchCount: Dispatch<SetStateAction<number>>;
+  sessionMetadata: SessionMetadata;
+  recordBlurAt: (ts: number) => void;
+  closeBlurWithFocus: (ts: number) => void;
+  recordFullscreenExit: (ts: number) => void;
+  recordProctorResume: (at: number, variant: "fullscreen" | "focus") => void;
   isFinalizing: boolean;
   finalizeError: string | null;
   finalizeVivaSession: () => Promise<void>;
@@ -60,6 +75,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [questions, setQuestions] = useState<QuestionObject[]>([]);
+  const [extractedText, setExtractedText] = useState("");
+  const [extractedSources, setExtractedSources] = useState<ExtractedSource[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [classification, setClassificationState] = useState<ClassificationInfo | null>(
     null,
@@ -69,16 +86,30 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [personaFocus, setPersonaFocus] = useState<string | null>(null);
   const [fullTranscript, setFullTranscript] = useState("");
   const [integrityAlertCount, setIntegrityAlertCount] = useState(0);
+  const [tabSwitchCount, setTabSwitchCount] = useState(0);
+  const [sessionMetadata, setSessionMetadata] = useState<SessionMetadata>({
+    blurSegments: [],
+    fullscreenExits: [],
+    proctorResumeActions: [],
+  });
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
 
   const transcriptRef = useRef("");
   const integrityRef = useRef(0);
+  const tabSwitchRef = useRef(0);
+  const sessionMetadataRef = useRef<SessionMetadata>({
+    blurSegments: [],
+    fullscreenExits: [],
+    proctorResumeActions: [],
+  });
   const sessionIdRef = useRef<string | null>(null);
   const finalizeOnceRef = useRef(false);
 
   transcriptRef.current = fullTranscript;
   integrityRef.current = integrityAlertCount;
+  tabSwitchRef.current = tabSwitchCount;
+  sessionMetadataRef.current = sessionMetadata;
   sessionIdRef.current = sessionId;
 
   const setClassification = useCallback((c: ClassificationInfo | null) => {
@@ -114,6 +145,57 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const recordBlurAt = useCallback((ts: number) => {
+    setSessionMetadata((prev) => {
+      const next: SessionMetadata = {
+        ...prev,
+        blurSegments: [...prev.blurSegments, { blurAt: ts }],
+      };
+      sessionMetadataRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const closeBlurWithFocus = useCallback((ts: number) => {
+    setSessionMetadata((prev) => {
+      const segments = [...prev.blurSegments];
+      for (let i = segments.length - 1; i >= 0; i -= 1) {
+        if (segments[i].focusAt === undefined) {
+          segments[i] = { ...segments[i], focusAt: ts };
+          break;
+        }
+      }
+      const next = { ...prev, blurSegments: segments };
+      sessionMetadataRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const recordFullscreenExit = useCallback((ts: number) => {
+    setSessionMetadata((prev) => {
+      const next: SessionMetadata = {
+        ...prev,
+        fullscreenExits: [...prev.fullscreenExits, ts],
+      };
+      sessionMetadataRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const recordProctorResume = useCallback((at: number, variant: "fullscreen" | "focus") => {
+    setSessionMetadata((prev) => {
+      const next: SessionMetadata = {
+        ...prev,
+        proctorResumeActions: [
+          ...(prev.proctorResumeActions ?? []),
+          { at, variant },
+        ],
+      };
+      sessionMetadataRef.current = next;
+      return next;
+    });
+  }, []);
+
   const resetToLobby = useCallback(() => {
     finalizeOnceRef.current = false;
     setSessionStatus("lobby");
@@ -122,6 +204,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setCurrentQuestionIndex(0);
     setUploads([]);
     setQuestions([]);
+    setExtractedText("");
+    setExtractedSources([]);
     setSessionId(null);
     setClassificationState(null);
     setCurrentSubject(null);
@@ -129,10 +213,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setPersonaFocus(null);
     setFullTranscript("");
     setIntegrityAlertCount(0);
+    setTabSwitchCount(0);
+    setSessionMetadata({
+      blurSegments: [],
+      fullscreenExits: [],
+      proctorResumeActions: [],
+    });
     setIsFinalizing(false);
     setFinalizeError(null);
     transcriptRef.current = "";
     integrityRef.current = 0;
+    tabSwitchRef.current = 0;
+    sessionMetadataRef.current = {
+      blurSegments: [],
+      fullscreenExits: [],
+      proctorResumeActions: [],
+    };
     sessionIdRef.current = null;
   }, []);
 
@@ -140,10 +236,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     finalizeOnceRef.current = false;
     setFullTranscript("");
     setIntegrityAlertCount(0);
+    setTabSwitchCount(0);
+    setSessionMetadata({
+      blurSegments: [],
+      fullscreenExits: [],
+      proctorResumeActions: [],
+    });
     setIsFinalizing(false);
     setFinalizeError(null);
     transcriptRef.current = "";
     integrityRef.current = 0;
+    tabSwitchRef.current = 0;
+    sessionMetadataRef.current = {
+      blurSegments: [],
+      fullscreenExits: [],
+      proctorResumeActions: [],
+    };
     setSessionStatus("active");
     setCurrentQuestionIndex(0);
     setProcessingStep(null);
@@ -159,7 +267,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     const sid = sessionIdRef.current;
     const transcript = transcriptRef.current;
-    const alerts = integrityRef.current;
+    const alerts = tabSwitchRef.current;
 
     try {
       if (sid) {
@@ -167,6 +275,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           transcript,
           integrityAlertCount: alerts,
           finalScore: null,
+          sessionMetadataJson: JSON.stringify(sessionMetadataRef.current),
         });
       }
       setSessionStatus("complete");
@@ -193,6 +302,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setUploads,
       questions,
       setQuestions,
+      extractedText,
+      setExtractedText,
+      extractedSources,
+      setExtractedSources,
       sessionId,
       setSessionId,
       classification,
@@ -205,6 +318,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       appendTranscriptSegment,
       integrityAlertCount,
       incrementIntegrityAlerts,
+      tabSwitchCount,
+      setTabSwitchCount,
+      sessionMetadata,
+      recordBlurAt,
+      closeBlurWithFocus,
+      recordFullscreenExit,
+      recordProctorResume,
       isFinalizing,
       finalizeError,
       finalizeVivaSession,
@@ -217,6 +337,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       currentQuestionIndex,
       uploads,
       questions,
+      extractedText,
+      extractedSources,
       sessionId,
       classification,
       currentSubject,
@@ -227,6 +349,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       appendTranscriptSegment,
       integrityAlertCount,
       incrementIntegrityAlerts,
+      tabSwitchCount,
+      sessionMetadata,
+      recordBlurAt,
+      closeBlurWithFocus,
+      recordFullscreenExit,
+      recordProctorResume,
       isFinalizing,
       finalizeError,
       finalizeVivaSession,
